@@ -14,18 +14,119 @@ import reactor.core.publisher.Mono
 @ExtendWith(SpringExtension::class)
 @SpringBootTest
 class ApiServiceTest {
-
-    private val webClientBuilder: WebClient.Builder = mock(WebClient.Builder::class.java)
     private val webClient: WebClient = mock(WebClient::class.java)
     private val requestHeadersUriSpec = mock(WebClient.RequestHeadersUriSpec::class.java)
     private val requestHeadersSpec = mock(WebClient.RequestHeadersSpec::class.java)
     private val responseSpec = mock(WebClient.ResponseSpec::class.java)
 
     init {
-        `when`(webClientBuilder.build()).thenReturn(webClient)
         `when`(webClient.get()).thenReturn(requestHeadersUriSpec)
         `when`(requestHeadersUriSpec.uri(anyString())).thenReturn(requestHeadersSpec)
         `when`(requestHeadersSpec.retrieve()).thenReturn(responseSpec)
+    }
+
+    @Test
+    fun `test circuit breaker transitions`() {
+        val apiService = CircuitBreakerApiService(webClient)
+
+        `when`(responseSpec.bodyToMono(String::class.java))
+            .thenReturn(
+                Mono.error(
+                    WebClientResponseException(
+                        HttpStatus.INTERNAL_SERVER_ERROR.value(),
+                        "Error",
+                        null,
+                        null,
+                        null
+                    )
+                )
+            )
+            .thenReturn(
+                Mono.error(
+                    WebClientResponseException(
+                        HttpStatus.INTERNAL_SERVER_ERROR.value(),
+                        "Error",
+                        null,
+                        null,
+                        null
+                    )
+                )
+            )
+            .thenReturn(
+                Mono.error(
+                    WebClientResponseException(
+                        HttpStatus.INTERNAL_SERVER_ERROR.value(),
+                        "Error",
+                        null,
+                        null,
+                        null
+                    )
+                )
+            )
+            .thenReturn(Mono.just("Recovered Response"))
+
+        repeat(3) {
+            assertThrows(WebClientResponseException::class.java) {
+                apiService.getDataWithCircuitBreaker("http://example.com")
+            }
+        }
+
+        Thread.sleep(11000) // Wait for circuit breaker timeout
+
+        val result = apiService.getDataWithCircuitBreaker("http://example.com")
+        assertEquals("Recovered Response", result)
+    }
+
+    @Test
+    fun `test circuit breaker remains open on failure after half-open`() {
+        val apiService = CircuitBreakerApiService(webClient)
+
+        `when`(responseSpec.bodyToMono(String::class.java))
+            .thenReturn(
+                Mono.error(
+                    WebClientResponseException(
+                        HttpStatus.INTERNAL_SERVER_ERROR.value(),
+                        "Error",
+                        null,
+                        null,
+                        null
+                    )
+                )
+            )
+
+        repeat(3) {
+            assertThrows(WebClientResponseException::class.java) {
+                apiService.getDataWithCircuitBreaker("http://example.com")
+            }
+        }
+
+        Thread.sleep(11000) // Wait for circuit breaker timeout
+
+        assertThrows(WebClientResponseException::class.java) {
+            apiService.getDataWithCircuitBreaker("http://example.com")
+        }
+    }
+
+    @Test
+    fun `test retry logic`() {
+        val apiService = ApiService(webClient)
+
+        `when`(responseSpec.bodyToMono(String::class.java))
+            .thenReturn(
+                Mono.error(
+                    WebClientResponseException(
+                        HttpStatus.INTERNAL_SERVER_ERROR.value(),
+                        "Error",
+                        null,
+                        null,
+                        null
+                    )
+                )
+            )
+            .thenReturn(Mono.just("Recovered Response"))
+
+        val result = apiService.getData("http://example.com")
+        assertEquals("Recovered Response", result)
     }
 
     @Test
@@ -55,7 +156,17 @@ class ApiServiceTest {
     @Test
     fun `test request with one retry and success`() {
         `when`(responseSpec.bodyToMono(String::class.java))
-            .thenReturn(Mono.error(WebClientResponseException(HttpStatus.INTERNAL_SERVER_ERROR.value(), "Error", null, null, null)))
+            .thenReturn(
+                Mono.error(
+                    WebClientResponseException(
+                        HttpStatus.INTERNAL_SERVER_ERROR.value(),
+                        "Error",
+                        null,
+                        null,
+                        null
+                    )
+                )
+            )
             .thenReturn(Mono.just("Recovered Response"))
 
         val apiService = ApiService(webClient)
